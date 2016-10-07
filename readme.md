@@ -17,6 +17,7 @@ Projektni tim:
 Mihaela Vranić (mihaela.vranic@fer.hr)
 Frano Škopljanac-Mačina (frano.skopljanac-macina@fer.hr)
 
+Marko Banek (marko.banek@ericsson.com)
 Luka Humski (luka.humski@fer.hr)
 
 Boris Vrdoljak (boris.vrdoljak@fer.hr)
