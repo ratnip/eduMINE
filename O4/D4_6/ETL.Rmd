@@ -1,0 +1,449 @@
+---
+title: "HRZZ_edumine"
+author: "Damir Pintar"
+date: "November 23, 2017"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(stringr)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(eval = TRUE)
+```
+
+```{r, echo = FALSE}
+webOEfile <- #
+webOEpw <- #
+eduMINEdbname <- #
+eduMINEserver <- #
+eduMINEadmin <- #
+eduMINEpw <- #
+
+fixCroLetters <- function(x) {
+    x <- gsub("'", "z", x)
+    x <- gsub("ž", "z", x)
+    x <- gsub("š", "s", x)
+    x <- gsub("č", "c", x)
+    x <- gsub("ć", "c", x)
+    x <- gsub("đ", "d", x)
+    x <- gsub("Ž", "Z", x)
+    x <- gsub("Š", "S", x)
+    x <- gsub("Č", "C", x)
+    x <- gsub("Ć", "C", x)
+    x <- gsub("Đ", "D", x)
+    x <- gsub("ö", "o", x)
+    x <- gsub("ü", "u", x)
+    x <- gsub("é", "e", x)
+    x <- gsub("è", "e", x)
+    #x <- gsub("<", "&lt;", x)
+    #x <- gsub(">", "&gt;", x)
+    x <- gsub("•", "", x)
+    x <- gsub("·", "", x)
+    
+    x <- gsub("æ", "", x)
+    x <- gsub("µ", "(mikro)", x)
+    x <- gsub("ð", "dj", x)
+    x <- gsub("±", "(plusminus)", x)
+    x <- gsub("°", "(stupnjeva)", x)
+
+    x
+}
+
+```
+
+### Uspotavljanje konekcija i testiranje uspješnosti
+
+Prvo uspostavljamo dvije konekcije:
+
+- `WebOEcon` - konekcija prema *WebOE* bazi (*Microsoft Access* platforma)
+- `eduMINEcon` - konekcija prema *eduMINE_hrzz* bazi (*PostgreSQL 9.3* platforma)
+
+Iz sigurnosnih razloga parametri konekcije pohranjeni su u unaprijed inicijaliziranim varijablama te su izuzeti iz izlistanja programskog koda.
+
+```{r, warnings = F}
+# učitavamo potrebne pakete
+library(RODBC)
+library(RPostgreSQL)
+
+#WebOE konekcija - Access
+WebOEcon <- odbcConnectAccess2007(webOEfile, pwd = webOEpw)
+
+#eduMINE konekcija - Postgres
+eduMINEdrv <- dbDriver("PostgreSQL")
+eduMINEcon <- dbConnect(eduMINEdrv, dbname = eduMINEdbname,
+                 host = eduMINEserver, port = 5432,
+                 user = eduMINEadmin, password = eduMINEpw)
+
+
+```
+
+
+
+Slijedi izvoz podataka kojeg radimo prema sljedećim fazama:
+- izvoz podataka o studentima i nastavnicima
+- izvoz podataka o grupama
+- izvoz podataka o zadacima i rješenjima
+- izvoz podataka o rješavanosti ispita
+
+
+### Izvoz podataka o studentima i nastavnicima
+
+Kod izvoženja podataka o studentima tablicu *polaznici* iz baze *WebOE* mapiramo u tablicu *student* u bazi *eduMINE_hrzz*.
+
+```{r, warnings = F}
+studenti <- sqlQuery(WebOEcon, "SELECT * FROM polaznici")
+#names(studenti)
+studenti$prezime_ime <- paste(studenti$prezime, studenti$ime)
+studenti$prezime_ime <- fixCroLetters(studenti$prezime_ime)
+studenti$e_mail <- fixCroLetters(studenti$e_mail)
+
+studenti %>% select(ID, mbroj, e_mail, prezime_ime, spol) -> studenti
+
+for (i in 1:nrow(studenti)) {
+  query <- paste0("INSERT INTO EDUMINE_HRZZ.STUDENT(id, email, jmbag, prezime_ime, spol) VALUES (",
+                  studenti[i,]$ID, ", ",
+                  "'", studenti[i,]$e_mail, "', ",
+                  "'", studenti[i,]$mbroj, "', ",
+                  "'", studenti[i,]$prezime_ime, "', ",
+                  "'", studenti[i,]$spol, "');")
+  
+  dbExecute(eduMINEcon, query)
+}
+dbCommit(eduMINEcon)
+```
+
+Sada ćemo popuniti podatke o nastavnicima.
+
+```{r, warnings = F }
+nastavnici <- sqlQuery(WebOEcon, "SELECT * FROM nastavnici")
+#names(nastavnici)
+nastavnici$prezime_ime <- paste(nastavnici$prezime, nastavnici$ime)
+nastavnici$prezime_ime <- fixCroLetters(nastavnici$prezime_ime)
+
+for (i in 1:nrow(nastavnici)) {
+  query <- paste0("INSERT INTO EDUMINE_HRZZ.NASTAVNIK(id, email, prezime_ime) VALUES (",
+                  nastavnici[i,]$ID, ", ",
+                  "'", nastavnici[i,]$e_mail, "', ",
+                  "'", nastavnici[i,]$prezime_ime, "');")
+  
+  dbExecute(eduMINEcon, query)
+}
+dbCommit(eduMINEcon)
+
+
+```
+
+
+
+### Izvoz podataka o grupama
+
+Idući korak je povezivanje studenata sa grupama u koje su bili upisani.
+
+Operativni sustav WebOE trenutno nema tablicu za grupe već se te informacije mogu naći u tablici `upisanegodine`. Zbog ovoga moramo raditi izvjesne manipulacije nad podacima.
+
+```{r, warnings = F}
+query <- "INSERT INTO EDUMINE_HRZZ.tip_grupe VALUES(1, 'nastava')"
+dbExecute(eduMINEcon, query)
+query <- "INSERT INTO EDUMINE_HRZZ.tip_grupe VALUES(2, 'labos')"
+dbExecute(eduMINEcon, query)
+
+
+
+grupe <- sqlQuery(WebOEcon, "SELECT * FROM upisanegodine")
+grupe %>% select(godina, grupa) %>% unique -> grupeN
+grupeN$tip_grupe_id <- 1
+grupe %>% select(godina, grupaL) %>% unique -> grupeL
+grupeL$tip_grupe_id <- 2
+names(grupeL)[2] <- "grupa"
+grupe <- rbind(grupeN, grupeL)
+grupe$akgodina <- substr(grupe$godina, 1, 4)
+grupe$grupa.id <- 1:nrow(grupe)
+
+for (i in 1:nrow(grupe)) {
+  query <- paste0("INSERT INTO EDUMINE_HRZZ.GRUPA(id, akgodina, opis, tip_grupe_id) VALUES (",
+                  grupe[i,]$grupa.id, ", ",
+                  grupe[i,]$akgodina, ", '",
+                  grupe[i,]$grupa, "', ",
+                  grupe[i,]$tip_grupe_id, ");")
+  
+  dbExecute(eduMINEcon, query)
+}
+
+dbCommit(eduMINEcon)
+```
+
+Sada možemo povezati studente sa grupama iz predavanja i laboratorija.
+
+```{r, warnings = F}
+
+upisi <- sqlQuery(WebOEcon, "SELECT * FROM upisanegodine")
+
+upisi %>% inner_join(grupe, by = c("godina" = "godina", "grupa" = "grupa")) %>% filter(tip_grupe_id == 1) -> upisiN
+
+for (i in 1:nrow(upisiN)) {
+  query <- paste0("INSERT INTO EDUMINE_HRZZ.STUDENT_GRUPA(id, student_id, grupa_id) VALUES (",
+                  i, ", ",
+                  upisiN[i,]$ID, ", ",
+                  upisiN[i,]$grupa.id, ");")
+  #print(query)
+  dbExecute(eduMINEcon, query)
+}
+
+upisi %>% inner_join(grupe, by = c("grupaL" = "grupa", "godina" = "godina")) %>% filter(tip_grupe_id == 2) -> upisiL
+
+for (i in 1:nrow(upisiL)) {
+  query <- paste0("INSERT INTO EDUMINE_HRZZ.STUDENT_GRUPA(id, student_id, grupa_id) VALUES (",
+                  nrow(upisiN) + i, ", ",
+                  upisiL[i,]$ID, ", ",
+                  upisiL[i,]$grupa.id, ");")
+  
+  dbExecute(eduMINEcon, query)
+}
+
+dbCommit(eduMINEcon)
+```
+
+
+### Izvoz podataka o zadacima
+
+Za sada ćemo samo pretakati podatke o zadacima sa višestrukim izborom, jednim točnim odgovorom, budući da su ona u velikoj većini. Ostali tipovi će zahtjevati intenzivne preinake koje će se obaviti tijekom uvođenja novog nastavnog programa.
+
+```{r}
+# za sada samo upisujemo zadatke sa visestrukim izborom, jednim tocnim odgovorom
+# buduci da su ona u velikoj vecini
+# ostali tipovi će zahtjevati intenzivne preinake
+# koje će se obaviti tijekom uvođenja novog nastavnog programa
+query <- "INSERT INTO EDUMINE_HRZZ.tip_zadatka VALUES(1, 'visestruki izbor, 1 tocan')"
+dbExecute(eduMINEcon, query)
+
+```
+
+
+```{r}
+pitanja <- sqlQuery(WebOEcon, "SELECT * FROM pitanja")
+pitanja$pitanje <- fixCroLetters(pitanja$pitanje)
+pitanja$odg1 <- fixCroLetters(pitanja$odg1)
+pitanja$odg2 <- fixCroLetters(pitanja$odg2)
+pitanja$odg3 <- fixCroLetters(pitanja$odg3)
+pitanja$odg4 <- fixCroLetters(pitanja$odg4)
+pitanja$odg5 <- fixCroLetters(pitanja$odg5)
+pitanja %>% filter(tipp == 1) -> pitanja
+
+for (i in 1:nrow(pitanja)) {
+  query <- paste0("INSERT INTO EDUMINE_HRZZ.ZADATAK(id, tekst, tip_zadatka_id) VALUES (",
+                  pitanja[i,]$ID, ", '",
+                  iconv(pitanja[i,]$pitanje, "latin1", "ASCII", sub=""), "', 1);")
+  
+  dbExecute(eduMINEcon, query)
+}
+
+dbCommit(eduMINEcon)
+
+
+```
+
+
+Rješenja u operativnoj bazi su integrirana u pitanja. Za prijenos u skladište potrebno ih je rastaviti u zasebne tablice.
+
+```{r}
+j <- 1
+for (i in 1:nrow(pitanja)) {
+  # odgovori su odg1, odg2, ... odg5
+  # moramo ponoviti sličan odsječak pet puta
+  query <- paste0("INSERT INTO EDUMINE_HRZZ.RJESENJE(id, oznaka, tekst_vrijednost, tekst_prikaz, tocnost, zadatak_id) VALUES (",
+                  j, ", 'A', '",
+                  iconv(pitanja[i,]$odg1, "latin1", "ASCII", sub=""), "', '",
+                  iconv(pitanja[i,]$odg1, "latin1", "ASCII", sub=""), "', '",
+                  pitanja[i,]$a1, "', ",
+                  pitanja[i,]$ID, ");")
+  dbExecute(eduMINEcon, query)
+  j <- j+1
+  
+  query <- paste0("INSERT INTO EDUMINE_HRZZ.RJESENJE(id, oznaka, tekst_vrijednost, tekst_prikaz, tocnost, zadatak_id) VALUES (",
+                  j, ", 'B', '",
+                  iconv(pitanja[i,]$odg2, "latin1", "ASCII", sub=""), "', '",
+                  iconv(pitanja[i,]$odg2, "latin1", "ASCII", sub=""), "', '",
+                  pitanja[i,]$a2, "', ",
+                  pitanja[i,]$ID, ");")
+  dbExecute(eduMINEcon, query)
+  j <- j+1
+  
+  query <- paste0("INSERT INTO EDUMINE_HRZZ.RJESENJE(id, oznaka, tekst_vrijednost, tekst_prikaz, tocnost, zadatak_id) VALUES (",
+                  j, ", 'C', '",
+                  iconv(pitanja[i,]$odg3, "latin1", "ASCII", sub=""), "', '",
+                  iconv(pitanja[i,]$odg3, "latin1", "ASCII", sub=""), "', '",
+                  pitanja[i,]$a3, "', ",
+                  pitanja[i,]$ID, ");")
+  dbExecute(eduMINEcon, query)
+  j <- j+1
+  
+  query <- paste0("INSERT INTO EDUMINE_HRZZ.RJESENJE(id, oznaka, tekst_vrijednost, tekst_prikaz, tocnost, zadatak_id) VALUES (",
+                  j, ", 'D', '",
+                  iconv(pitanja[i,]$odg4, "latin1", "ASCII", sub=""), "', '",
+                  iconv(pitanja[i,]$odg4, "latin1", "ASCII", sub=""), "', '",
+                  pitanja[i,]$a4, "', ",
+                  pitanja[i,]$ID, ");")
+  dbExecute(eduMINEcon, query)
+  j <- j+1
+  
+  query <- paste0("INSERT INTO EDUMINE_HRZZ.RJESENJE(id, oznaka, tekst_vrijednost, tekst_prikaz, tocnost, zadatak_id) VALUES (",
+                  j, ", 'E', '",
+                  iconv(pitanja[i,]$odg5, "latin1", "ASCII", sub=""), "', '",
+                  iconv(pitanja[i,]$odg5, "latin1", "ASCII", sub=""), "', '",
+                  pitanja[i,]$a5, "', ",
+                  pitanja[i,]$ID, ");")
+  dbExecute(eduMINEcon, query)
+  j <- j+1
+}
+
+dbCommit(eduMINEcon)
+
+```
+
+## Izvoz podataka o ispitima i rješavanosti
+
+Uvodimo tip ispita - pismeni. Za sada izvozimo samo zadatke o pismenima.
+
+
+```{r}
+query <- "INSERT INTO EDUMINE_HRZZ.tip_ispita VALUES(1, 'pismeni')"
+dbExecute(eduMINEcon, query)
+dbCommit(eduMINEcon)
+```
+
+Sada izvozimo podatke o ispitima. Akademska godina je "skrivena" u opisu ispita pa je moramo rekonstruirati.
+
+```{r}
+ispiti <- sqlQuery(WebOEcon, "SELECT * FROM odgovori")
+ispiti %>% select(ID, ime_isp, var) %>% unique %>% filter(!is.na(var)) -> ispiti
+ispiti$opisni_id <- paste0(ispiti$ime_isp, "-", ispiti$var)
+ispiti$akgod <- str_extract(ispiti$ime_isp, "\\d\\d")
+ispiti$akgod <- ifelse(substr(ispiti$akgod, 1, 1) %in% c("8, 9"), 
+                       paste0("19", ispiti$akgod), paste0("20", ispiti$akgod))
+
+for (i in 1:nrow(ispiti)) {
+  query <- paste0("INSERT INTO EDUMINE_HRZZ.ispit(id, akgodina, opisni_id, opis, tip_ispita_id) VALUES (",
+                  ispiti[i,]$ID, ", ",
+                  ispiti[i,]$akgod, ", '",
+                  ispiti[i,]$opisni_id, "', '",
+                  ispiti[i,]$ime_isp, "', 1);")
+  #print(query)
+  dbExecute(eduMINEcon, query)
+}
+
+dbCommit(eduMINEcon)
+
+```
+
+ 
+Zadaci na ispitima:
+
+```{r}
+zadaci <- sqlQuery(WebOEcon, "SELECT * FROM pismeni_tocni_odgovori")
+zadaci %>% select(IDinacica, IDpitanja) %>% filter(!is.na(IDpitanja)) %>% unique -> zadaci
+
+for (i in 1:nrow(zadaci)) {
+  query <- paste0("INSERT INTO EDUMINE_HRZZ.ispitni_zadatak(id, zadatak_id, ispit_id) VALUES (",
+                  i, ", ",
+                  zadaci[i,]$IDpitanja, ", ",
+                  zadaci[i,]$IDinacica, ");")
+  #print(query)
+  dbExecute(eduMINEcon, query)
+}
+
+dbCommit(eduMINEcon)
+```
+
+
+Konačno, rješenja studenata na ispitima. Ovo je najkompleksniji dio, budući da su u operativnoj bazi svi potrebni atributi "razbacani" po nekoliko tablica, tako da ćemo do svake komponente (identifikator ispita, identifikator ispitnog zadatka, identifikator rješenja) morati doći "zaobilazno".
+
+Prvo uzimamo retke iz tablice `pismeni_ETL` - virtualne tablice koja sadrži podatke o rješenjima koje su studenti zaokružili na pojedinom ispitu.
+
+```{r}
+rjesenja <- sqlQuery(WebOEcon, "SELECT * FROM pismeni_ETL")
+
+```
+
+Identifikator studenta u ovoj tablici nije "pravi" identifikator, budući da se isti student može pojaviti više puta (student koji je pao godinu ima novi identifikator). Zbog toga moramo prvo ovaj identifikator zamijeniti pravim, što možemo preko njegovog akademskog matičnog broja kroz podatke iz tablice `polaznici` i podatke iz tablice `upisanegodine`.
+
+```{r}
+polaznici <- sqlQuery(WebOEcon, "SELECT * FROM polaznici")
+names(polaznici)[1] <- "stvarni_ID"
+upisane <- sqlQuery(WebOEcon, "SELECT * FROM upisanegodine")
+polaznici %>% inner_join(upisane, by = c("mbroj" = "mbroj")) -> temp
+
+rjesenja %>% inner_join(temp, by = c("studentID" = "ID")) -> rjesenja
+
+```
+
+
+Ispitni zadaci u `eduMINE` bazi nalaze se u zasebnoj tablici sa svojim identifikatorima. Kako bi povezali rjesenje sa ispitnim zadatkom moramo:
+
+- izvući identifikator ispita uz pomoć "opisnog" identifikatora (kombinacija opisa i inačice)
+- izvući identifikator ispitnog zadatka uz pomoć identifikatora ispita i identifikatora zadatka
+
+```{r}
+rjesenja$opisni_id <- paste0(rjesenja$ispit, "-", rjesenja$inacica)
+ispiti <- dbGetQuery(eduMINEcon, "SELECT * FROM edumine_hrzz.ispit")
+ispiti$opisni_id <- str_trim(ispiti$opisni_id) #dodao je praznine!
+
+rjesenja %>% inner_join(ispiti, by = c("opisni_id" = "opisni_id")) -> rjesenja
+```
+
+Izbacimo stupce koji nam ne trebaju.
+
+```{r}
+rjesenja %>% select(stvarni_ID, id, pitanjeID, konacan_odgovor) -> rjesenja
+names(rjesenja) <- c("student_ID", "ispit_ID", "zadatak_ID", "oznaka")
+```
+
+ Dohvaćamo identifikator ispitnog zadatka.
+ 
+```{r}
+isp_zad <- dbGetQuery(eduMINEcon, "SELECT * FROM edumine_hrzz.ispitni_zadatak")
+names(isp_zad) <- c("isp_zad_id", "zadatak_ID", "ispit_ID")
+rjesenja %>% inner_join(isp_zad) -> rjesenja
+
+```
+ 
+ Oznaka zadatka govori nam koje rješenje je student izabrao.
+ 
+```{r}
+rj_zad <- dbGetQuery(eduMINEcon, "SELECT * FROM edumine_hrzz.rjesenje")
+rj_zad %>% select(id, oznaka, zadatak_id) -> rj_zad
+rj_zad$oznaka <- str_trim(rj_zad$oznaka)
+names(rj_zad)[1] <- "rjesenje_ID"
+
+rjesenja %>% left_join(rj_zad, by = c("oznaka" = "oznaka", "zadatak_ID" = "zadatak_id")) -> rjesenja
+
+
+for (i in 1:nrow(rjesenja)) {
+  query <- paste0("INSERT INTO EDUMINE_HRZZ.ispitni_zadatak_rjesenje(id, ",
+                  "ispitni_zadatak_id, rjesenje_id, student_id) VALUES (",
+                  i, ", ",
+                  rjesenja[i,]$isp_zad_id, ", ",
+                  ifelse(is.na(rjesenja[i,]$rjesenje_ID), "NULL", rjesenja[i,]$rjesenje_ID), ", ",
+                  rjesenja[i,]$student_ID, ");")
+  #print(query)
+  dbExecute(eduMINEcon, query)
+}
+
+dbCommit(eduMINEcon)
+```
+  
+  Ovime smo prebacili sve podatke o rješavanosti pismenih ispita u skladište podataka eduMINE. Podaci su u trećoj normalnoj formi i spremni za daljnje analize. 
+ 
+ # Zaključak
+ 
+U ovom dokumentu dan je ispis automatske ETL procedure za prijenos svih podataka iz operativne baze predmeta u skladište podataka izvedeno za potrebe projekta eduMINE.
+ 
+ Važno je napomenuti da će ova ETL procedura punjenja skladišta uvijek prevoziti SVE podatke, tj. nema mogućnosti inkrementalnog punjenja. Glavni razlog tome je taj što operativna baza nema sustav vremenskih oznaka koji bi olakšao ovakvu izvedbu. No obzirom na količinu podataka (najveća tablica trenutno ima nešto manje od 200,000 redaka) izvoženje podataka ne predstavlja preveliki zahtjev nad resursima. Ukoliko u budućnosti dođe do potrebe skaliranja ili stvarnovremenskog izvještavanja, morati će se osposobiti ETL cjevovod koji bi direktno prenosio podatke u trenutku njihovog pojavljivanja u operativnoj bazi. Za izvedbu ovakvog principa u pomoć nam mogu doći tzv. *streaming* tehnologije koje se često povezuju sa analizom velikih podataka. Analiza ovih tehnologija obaviti će se u zasebnoj studiji u okviru projekta eduMINE.
+ 
+ 
+ 
+ 
+ 
